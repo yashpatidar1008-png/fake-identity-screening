@@ -19,6 +19,7 @@ st.set_page_config(
 )
 
 st.title("🔍 AI-Based Fake Identity & Document Screening System")
+
 st.caption(
     "Prototype for document screening, face verification and explainable risk assessment"
 )
@@ -30,7 +31,6 @@ st.caption(
 
 def find_tesseract():
 
-    # Streamlit Cloud / Linux
     possible_paths = [
         shutil.which("tesseract"),
         "/usr/bin/tesseract",
@@ -71,12 +71,16 @@ def run_ocr(image):
 
     try:
 
+        # Convert image to grayscale
         img = image.convert("L")
 
+        # Improve contrast
         img = ImageEnhance.Contrast(img).enhance(2)
 
+        # Sharpen
         img = img.filter(ImageFilter.SHARPEN)
 
+        # Save temporary image
         with tempfile.NamedTemporaryFile(
             suffix=".png",
             delete=False
@@ -85,6 +89,7 @@ def run_ocr(image):
             temp_input = f.name
             img.save(temp_input)
 
+        # Run Tesseract
         result = subprocess.run(
             [
                 TESSERACT,
@@ -109,6 +114,7 @@ def run_ocr(image):
 
             try:
                 os.remove(temp_input)
+
             except:
                 pass
 
@@ -131,12 +137,27 @@ def extract_fields(text):
         return fields
 
     # -----------------------------------------------------
-    # Aadhaar
+    # Clean OCR text
     # -----------------------------------------------------
+
+    clean_text = text.replace("\n", " ")
+
+    clean_text = re.sub(
+        r"\s+",
+        " ",
+        clean_text
+    ).strip()
+
+    # Common OCR correction
+    clean_text = clean_text.replace("|", "I")
+
+    # =====================================================
+    # AADHAAR NUMBER
+    # =====================================================
 
     aadhaar_match = re.search(
         r"\b\d{4}\s?\d{4}\s?\d{4}\b",
-        text
+        clean_text
     )
 
     if aadhaar_match:
@@ -149,14 +170,15 @@ def extract_fields(text):
 
         fields["Expiry Date"] = "No expiry date"
 
-    # -----------------------------------------------------
-    # Document Number
-    # -----------------------------------------------------
+
+    # =====================================================
+    # DOCUMENT NUMBER
+    # =====================================================
 
     doc_match = re.search(
-        r"(?:passport|document|id|number|no)"
-        r"[\s:#-]*([A-Z0-9]{6,15})",
-        text,
+        r"(?:passport|document|id|number|no|card)"
+        r"[\s:#.\-]*([A-Z0-9]{6,15})",
+        clean_text,
         re.IGNORECASE
     )
 
@@ -165,46 +187,150 @@ def extract_fields(text):
         and fields["Document Number"] == "Not detected"
     ):
 
-        fields["Document Number"] = doc_match.group(1)
+        fields["Document Number"] = (
+            doc_match.group(1)
+        )
 
-    # -----------------------------------------------------
-    # Date of Birth
-    # -----------------------------------------------------
 
-    dob_match = re.search(
-        r"(?:DOB|Date of Birth|Birth)"
-        r"[\s:#-]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})",
-        text,
-        re.IGNORECASE
+    # =====================================================
+    # DATE PATTERN
+    #
+    # Supports:
+    # 12/05/2000
+    # 12-05-2000
+    # 12.05.2000
+    # 12/5/00
+    # =====================================================
+
+    date_pattern = (
+        r"(\d{1,2}\s*[-/.]\s*"
+        r"\d{1,2}\s*[-/.]\s*"
+        r"\d{2,4})"
     )
 
-    if dob_match:
 
-        fields["Date of Birth"] = dob_match.group(1)
+    # =====================================================
+    # DATE OF BIRTH
+    # =====================================================
 
-    # -----------------------------------------------------
-    # Expiry
-    # -----------------------------------------------------
+    dob_patterns = [
 
-    expiry_match = re.search(
-        r"(?:Expiry|Expiration|Valid Until|Date of Expiry)"
-        r"[\s:#-]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4})",
-        text,
-        re.IGNORECASE
-    )
+        # DOB: 12/05/2000
+        r"(?:DOB|D\.O\.B|D O B)"
+        r"[\s:#=\-]*"
+        + date_pattern,
 
-    if expiry_match:
+        # Date of Birth: 12/05/2000
+        r"(?:Date\s*of\s*Birth|Date\s*of\s*birth)"
+        r"[\s:#=\-]*"
+        + date_pattern,
 
-        fields["Expiry Date"] = expiry_match.group(1)
+        # Birth Date: 12/05/2000
+        r"(?:Birth\s*Date|Birth)"
+        r"[\s:#=\-]*"
+        + date_pattern,
 
-    # -----------------------------------------------------
-    # Nationality
-    # -----------------------------------------------------
+        # Handles OCR text between label and date
+        r"(?:DOB|D\.O\.B|Date\s*of\s*Birth|Birth\s*Date|Birth)"
+        r".{0,40}?"
+        + date_pattern
+    ]
+
+
+    for pattern in dob_patterns:
+
+        dob_match = re.search(
+            pattern,
+            clean_text,
+            re.IGNORECASE
+        )
+
+        if dob_match:
+
+            fields["Date of Birth"] = (
+                dob_match.group(1)
+            )
+
+            break
+
+
+    # =====================================================
+    # FALLBACK DOB
+    #
+    # If OCR missed "DOB" label but date exists,
+    # detect the first date containing a 4-digit year.
+    # =====================================================
+
+    if fields["Date of Birth"] == "Not detected":
+
+        all_dates = re.findall(
+            date_pattern,
+            clean_text
+        )
+
+        if all_dates:
+
+            four_digit_dates = [
+                d for d in all_dates
+                if re.search(r"\d{4}", d)
+            ]
+
+            if four_digit_dates:
+
+                fields["Date of Birth"] = (
+                    four_digit_dates[0]
+                )
+
+            else:
+
+                fields["Date of Birth"] = (
+                    all_dates[0]
+                )
+
+
+    # =====================================================
+    # EXPIRY DATE
+    # =====================================================
+
+    expiry_patterns = [
+
+        r"(?:Expiry|Expiration|Valid\s*Until|"
+        r"Date\s*of\s*Expiry|Valid)"
+        r"[\s:#=\-]*"
+        + date_pattern,
+
+        r"(?:Expiry|Expiration|Valid\s*Until|"
+        r"Date\s*of\s*Expiry|Valid)"
+        r".{0,40}?"
+        + date_pattern
+    ]
+
+
+    for pattern in expiry_patterns:
+
+        expiry_match = re.search(
+            pattern,
+            clean_text,
+            re.IGNORECASE
+        )
+
+        if expiry_match:
+
+            fields["Expiry Date"] = (
+                expiry_match.group(1)
+            )
+
+            break
+
+
+    # =====================================================
+    # NATIONALITY
+    # =====================================================
 
     nationality_match = re.search(
-        r"(?:Nationality|Citizen)"
-        r"[\s:#-]*([A-Za-z]+)",
-        text,
+        r"(?:Nationality|Citizen|Citizenship)"
+        r"[\s:#=\-]*([A-Za-z]+)",
+        clean_text,
         re.IGNORECASE
     )
 
@@ -213,22 +339,29 @@ def extract_fields(text):
         and fields["Nationality"] == "Not detected"
     ):
 
-        fields["Nationality"] = nationality_match.group(1)
+        fields["Nationality"] = (
+            nationality_match.group(1)
+        )
 
-    # -----------------------------------------------------
-    # Name
-    # -----------------------------------------------------
+
+    # =====================================================
+    # NAME
+    # =====================================================
 
     name_match = re.search(
-        r"(?:Name|Full Name)"
-        r"[\s:#-]*([A-Za-z][A-Za-z .'-]{2,40})",
-        text,
+        r"(?:Name|Full\s*Name)"
+        r"[\s:#=\-]*"
+        r"([A-Za-z][A-Za-z .'-]{2,40})",
+        clean_text,
         re.IGNORECASE
     )
 
     if name_match:
 
-        fields["Name"] = name_match.group(1).strip()
+        fields["Name"] = (
+            name_match.group(1).strip()
+        )
+
 
     return fields
 
@@ -243,21 +376,31 @@ def tampering_analysis(image):
 
         data = image.tobytes()
 
-        file_hash = hashlib.sha256(data).hexdigest()
+        file_hash = hashlib.sha256(
+            data
+        ).hexdigest()
 
-        score = int(file_hash[:2], 16) % 41 + 30
+        score = (
+            int(file_hash[:2], 16) % 41
+        ) + 30
 
         if score >= 70:
 
-            status = "⚠️ Potential tampering detected"
+            status = (
+                "⚠️ Potential tampering detected"
+            )
 
         elif score >= 50:
 
-            status = "🟡 Requires manual review"
+            status = (
+                "🟡 Requires manual review"
+            )
 
         else:
 
-            status = "🟢 No strong prototype signal"
+            status = (
+                "🟢 No strong prototype signal"
+            )
 
         return score, status
 
@@ -291,7 +434,9 @@ if documents:
 
         try:
 
-            image = Image.open(uploaded_file).convert("RGB")
+            image = Image.open(
+                uploaded_file
+            ).convert("RGB")
 
         except Exception:
 
@@ -301,27 +446,34 @@ if documents:
 
             continue
 
+
+        # Display document
         st.image(
             image,
             caption=uploaded_file.name,
             width=400
         )
 
-        # -------------------------------------------------
+
+        # =================================================
         # OCR
-        # -------------------------------------------------
+        # =================================================
 
         ocr_text = run_ocr(image)
 
-        fields = extract_fields(ocr_text)
+        fields = extract_fields(
+            ocr_text
+        )
 
-        # -------------------------------------------------
+
+        # =================================================
         # Tampering
-        # -------------------------------------------------
+        # =================================================
 
         tampering_score, tampering_status = (
             tampering_analysis(image)
         )
+
 
         document_results.append(
             {
@@ -333,13 +485,17 @@ if documents:
             }
         )
 
-        # -------------------------------------------------
-        # OCR Extraction
-        # -------------------------------------------------
 
-        st.markdown("### OCR Extraction")
+        # =================================================
+        # OCR EXTRACTION
+        # =================================================
+
+        st.markdown(
+            "### OCR Extraction"
+        )
 
         col1, col2 = st.columns(2)
+
 
         with col1:
 
@@ -358,6 +514,7 @@ if documents:
                 fields["Nationality"]
             )
 
+
         with col2:
 
             st.write(
@@ -370,11 +527,17 @@ if documents:
                 fields["Expiry Date"]
             )
 
-        with st.expander("View Raw OCR Text"):
+
+        # Raw OCR
+        with st.expander(
+            "View Raw OCR Text"
+        ):
 
             if ocr_text:
 
-                st.text(ocr_text)
+                st.text(
+                    ocr_text
+                )
 
             else:
 
@@ -382,12 +545,17 @@ if documents:
                     "No OCR text detected."
                 )
 
-        # -------------------------------------------------
+
+        # =================================================
         # DOCUMENT VALIDATION
-        # -------------------------------------------------
+        # =================================================
 
-        st.markdown("### Document Validation")
+        st.markdown(
+            "### Document Validation"
+        )
 
+
+        # Document number
         if fields["Document Number"] != "Not detected":
 
             st.success(
@@ -400,6 +568,22 @@ if documents:
                 "⚠️ Document number not detected"
             )
 
+
+        # DOB
+        if fields["Date of Birth"] != "Not detected":
+
+            st.success(
+                "✅ Date of Birth detected"
+            )
+
+        else:
+
+            st.warning(
+                "⚠️ Date of Birth not detected"
+            )
+
+
+        # Expiry
         if fields["Expiry Date"] == "No expiry date":
 
             st.info(
@@ -418,18 +602,23 @@ if documents:
                 "⚠️ Expiry date not detected"
             )
 
-        # -------------------------------------------------
-        # TAMPERING
-        # -------------------------------------------------
 
-        st.markdown("### Tampering Detection")
+        # =================================================
+        # TAMPERING
+        # =================================================
+
+        st.markdown(
+            "### Tampering Detection"
+        )
 
         st.metric(
             "Prototype Tampering Score",
             f"{tampering_score}/100"
         )
 
-        st.write(tampering_status)
+        st.write(
+            tampering_status
+        )
 
         st.caption(
             "Prototype signal only — final verification "
@@ -508,9 +697,9 @@ risk_score = 0
 reasons = []
 
 
-# ---------------------------------------------------------
+# =========================================================
 # No document
-# ---------------------------------------------------------
+# =========================================================
 
 if not documents:
 
@@ -521,15 +710,16 @@ if not documents:
     )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Document checks
-# ---------------------------------------------------------
+# =========================================================
 
 if document_results:
 
     for result in document_results:
 
         fields = result["fields"]
+
 
         if fields["Document Number"] == "Not detected":
 
@@ -540,6 +730,7 @@ if document_results:
                 f"in {result['name']}."
             )
 
+
         if fields["Nationality"] == "Not detected":
 
             risk_score += 10
@@ -549,6 +740,7 @@ if document_results:
                 f"in {result['name']}."
             )
 
+
         if fields["Expiry Date"] == "Not detected":
 
             risk_score += 10
@@ -557,6 +749,7 @@ if document_results:
                 f"Expiry Date not detected "
                 f"in {result['name']}."
             )
+
 
         if result["tampering_score"] >= 70:
 
@@ -568,9 +761,9 @@ if document_results:
             )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Face check
-# ---------------------------------------------------------
+# =========================================================
 
 if face_file is None:
 
@@ -587,15 +780,16 @@ elif face_match is None:
     )
 
 
+# Limit score
 risk_score = min(
     risk_score,
     100
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Risk level
-# ---------------------------------------------------------
+# =========================================================
 
 if risk_score >= 60:
 
@@ -632,11 +826,13 @@ else:
     )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Reasons
-# ---------------------------------------------------------
+# =========================================================
 
-st.markdown("### Risk Factors")
+st.markdown(
+    "### Risk Factors"
+)
 
 if reasons:
 
@@ -670,6 +866,16 @@ if document_results:
         )
 
         st.write(
+            f"**Date of Birth:** "
+            f"{result['fields']['Date of Birth']}"
+        )
+
+        st.write(
+            f"**Document Number:** "
+            f"{result['fields']['Document Number']}"
+        )
+
+        st.write(
             f"Tampering Score: "
             f"{result['tampering_score']}/100"
         )
@@ -678,6 +884,7 @@ if document_results:
             f"Tampering Status: "
             f"{result['tampering_status']}"
         )
+
 
     if face_file:
 
@@ -693,10 +900,12 @@ if document_results:
             "NOT PROVIDED"
         )
 
+
     st.write(
         f"Overall Risk: "
         f"**{risk_level} ({risk_score}/100)**"
     )
+
 
 else:
 
