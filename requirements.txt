@@ -1,2 +1,4 @@
 streamlit
 Pillow
+deepface
+tf-keras
